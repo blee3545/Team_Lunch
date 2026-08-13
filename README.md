@@ -87,24 +87,6 @@ On Windows, use `.venv\\Scripts\\python.exe` in the last two commands. The resul
 is `dist/team-lunch` on macOS/Linux or `dist/team-lunch.exe` on Windows. Transfer
 that file together with a renamed `config.json`.
 
-## Test
-
-```text
-python3 -m unittest discover -v
-```
-
-Tests use simulated DoorDash responses and never create a cart or place an order.
-
-## Configuration
-
-`config.example.json` documents every MVP setting. Relative receipt and session
-paths are resolved beside the selected configuration file. Receipt files can
-include the charged card's last four digits and are created with owner-only file
-permissions where the operating system supports them.
-
-Scheduled times are entered as `YYYY-MM-DD HH:MM` in the configured timezone. The
-app converts them to an unambiguous UTC value and passes the exact same value to
-both preview and submission.
 
 ## Important limitations
 
