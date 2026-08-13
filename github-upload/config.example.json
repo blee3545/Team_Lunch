@@ -1,0 +1,11 @@
+{
+  "team_name": "Product Team",
+  "timezone": "America/Los_Angeles",
+  "restaurant_result_limit": 8,
+  "menu_display_limit": 40,
+  "spend_limit_dollars": 25,
+  "status_poll_attempts": 6,
+  "status_poll_seconds": 5,
+  "receipts_directory": "receipts",
+  "session_file": ".team-lunch-session.json"
+}
