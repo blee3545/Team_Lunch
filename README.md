@@ -5,7 +5,7 @@ shareable group cart, pauses while teammates add their food, previews the real
 scheduled-delivery price, and requires an organizer to approve the tip and named
 payment source before it submits anything.
 
-## What the MVP does
+## What this does
 
 1. Confirms the signed-in account's default delivery address.
 2. Searches restaurants and checks for an existing cart collision.
