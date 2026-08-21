@@ -22,9 +22,10 @@ def main() -> int:
     ]
     result = subprocess.call(command)
     if result == 0:
-        destination = Path("dist") / "config.example.json"
-        shutil.copy2("config.example.json", destination)
-        print(f"Copied example configuration to {destination}")
+        for filename in ("config.example.json", "README.md"):
+            destination = Path("dist") / filename
+            shutil.copy2(filename, destination)
+            print(f"Copied release file to {destination}")
     return result
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,21 @@ class Cancelled(RuntimeError):
     pass
 
 
+ORDER_CREATED_STATUSES = frozenset(
+    {
+        "placed",
+        "scheduled",
+        "store_confirmed",
+        "ready_for_pickup",
+        "dasher_assigned",
+        "dasher_at_store",
+        "picked_up",
+        "dasher_nearby",
+        "completed",
+    }
+)
+
+
 class LunchWorkflow:
     def __init__(self, dd: DDCLI, config: Dict[str, Any], config_path: Path) -> None:
         self.dd = dd
@@ -34,6 +50,7 @@ class LunchWorkflow:
         self.session_path = resolve_data_path(config_path, str(config["session_file"]))
 
     def start(self) -> None:
+        self.dd.require_minimum_version()
         print(f"\nTeam Lunch — {self.config['team_name']}")
         print("This creates a real DoorDash group cart. Nothing is charged until final approval.\n")
         delivery_address = self._choose_delivery_address()
@@ -72,6 +89,7 @@ class LunchWorkflow:
         self.finish(session)
 
     def resume(self) -> None:
+        self.dd.require_minimum_version()
         if not self.session_path.exists():
             raise DDCLIError(f"No saved lunch session was found at {self.session_path}.")
         try:
@@ -141,25 +159,38 @@ class LunchWorkflow:
                 "Check order history before trying again; re-submitting can create a duplicate."
             )
         status = self._poll_status(order_uuid)
-        if status == "successful":
+        self._show_order_status(order_uuid, status)
+        if status in ORDER_CREATED_STATUSES:
             print("\nOrder created successfully.")
-            self._save_receipt(order_uuid)
+            try:
+                self._save_receipt(order_uuid)
+            except DDCLIError as exc:
+                print(f"The receipt is not available yet: {exc}")
             try:
                 self.session_path.unlink()
             except OSError:
                 pass
         elif status == "action_required":
             print("\nDoorDash needs a verification step. Finish it in the DoorDash app or website.")
-        elif status == "failed":
+            self._offer_checkout_fallback(cart_uuid)
+        elif status == "order_declined":
             print("\nThe order did not go through. Review it in DoorDash; do not re-submit this cart blindly.")
+            self._offer_checkout_fallback(cart_uuid)
+        elif status == "cancelled":
+            print("\nDoorDash reports that this order was cancelled. Review the order in DoorDash.")
         elif status == "not_found":
             print("\nDoorDash could not find the submitted order. Check order history before trying anything else.")
+        elif status in {"unavailable", "unknown"}:
+            print(
+                "\nThe final order state could not be determined. Check DoorDash or order history; "
+                "do not re-submit this cart."
+            )
         else:
             print("\nThe order is still pending. Check DoorDash or run the status command later; do not re-submit.")
 
     def doctor(self) -> None:
         print(f"dd-cli found: {self.dd.resolve()}")
-        print(f"dd-cli version: {self.dd.version()}")
+        print(f"dd-cli version: {self.dd.require_minimum_version()}")
         try:
             response = self.dd.run_json(["address", "list"])
         except DDCLIError as exc:
@@ -259,12 +290,49 @@ class LunchWorkflow:
             raise DDCLIError("No restaurants matched that search. Try a different description.")
         print("\nRestaurants")
         for index, store in enumerate(stores, 1):
-            details = []
-            for key in ("delivery_time", "delivery_fee", "distance"):
-                if store.get(key):
-                    details.append(str(store[key]))
-            suffix = f" — {' · '.join(details)}" if details else ""
-            print(f"{index:>2}. {self._store_name(store)}{suffix}")
+            print(f"{index:>2}. {self._store_display(store)}")
+        return self._select_store(stores)
+
+    def _select_store(self, stores: List[Dict[str, Any]]) -> Dict[str, Any]:
+        while True:
+            raw = input("Choose a restaurant number, R for roulette, or Q to cancel: ").strip().lower()
+            if raw in {"r", "roulette"}:
+                return self._roulette_store(stores)
+            if raw in {"q", "quit", "cancel"}:
+                raise Cancelled("Restaurant selection cancelled; no cart was created.")
+            try:
+                selected = int(raw)
+            except ValueError:
+                print(f"Enter a number from 1 to {len(stores)}, R, or Q.")
+                continue
+            if 1 <= selected <= len(stores):
+                return stores[selected - 1]
+            print(f"Enter a number from 1 to {len(stores)}, R, or Q.")
+
+    def _roulette_store(self, stores: List[Dict[str, Any]]) -> Dict[str, Any]:
+        remaining = list(stores)
+        while remaining:
+            winner = secrets.choice(remaining)
+            remaining.remove(winner)
+            print(f"\nRoulette picked: {self._store_display(winner)}")
+            while True:
+                action = input("[A]ccept, [R]eroll, [M]anual selection, or [Q]uit: ").strip().lower()
+                if action in {"", "a", "accept"}:
+                    return winner
+                if action in {"r", "reroll"}:
+                    if remaining:
+                        break
+                    print("Every restaurant has appeared. Returning to manual selection.")
+                    return self._select_store_manual(stores)
+                if action in {"m", "manual"}:
+                    return self._select_store_manual(stores)
+                if action in {"q", "quit", "cancel"}:
+                    raise Cancelled("Restaurant roulette cancelled; no cart was created.")
+                print("Enter A, R, M, or Q.")
+        return self._select_store_manual(stores)
+
+    @staticmethod
+    def _select_store_manual(stores: List[Dict[str, Any]]) -> Dict[str, Any]:
         return stores[select_number("Choose a restaurant: ", len(stores)) - 1]
 
     def _handle_existing_cart(self, store: Dict[str, Any]) -> None:
@@ -531,18 +599,62 @@ class LunchWorkflow:
         else:
             print("Open this cart in the DoorDash app or website to finish checkout.")
 
+    def _offer_checkout_fallback(self, cart_uuid: str) -> None:
+        try:
+            self._print_checkout_url(cart_uuid)
+        except DDCLIError:
+            print("Open DoorDash in the app or on the website to review the order.")
+
     def _poll_status(self, order_uuid: str) -> str:
         attempts = max(1, int(self.config.get("status_poll_attempts", 6)))
         delay = max(1, int(self.config.get("status_poll_seconds", 5)))
         for attempt in range(attempts):
             response = self.dd.run_json(["order", "status", "--order-uuid", order_uuid])
-            status = str(response_value(response, "status", "pending")).lower()
+            status = self._classify_order_status(response)
             print(f"Order status: {status}")
             if status != "pending":
                 return status
             if attempt + 1 < attempts:
                 time.sleep(delay)
         return "pending"
+
+    @staticmethod
+    def _classify_order_status(response: Dict[str, Any]) -> str:
+        payload = find_mapping_with_key(response, "result")
+        if payload is None:
+            return "unavailable"
+        success = payload.get("success")
+        result = payload.get("result")
+        if success is False:
+            return "unavailable"
+        if result is None:
+            return "not_found" if success is True else "unavailable"
+        if success is not True or not isinstance(result, dict):
+            return "unavailable"
+        status = result.get("status")
+        if not isinstance(status, str) or not status.strip():
+            return "unknown"
+        normalized = status.strip().lower()
+        known = ORDER_CREATED_STATUSES | {
+            "pending",
+            "action_required",
+            "order_declined",
+            "cancelled",
+        }
+        return normalized if normalized in known else "unknown"
+
+    def _show_order_status(self, order_uuid: str, fallback_status: str) -> None:
+        print("\nFinal DoorDash status")
+        print("=" * 72)
+        try:
+            print(
+                self.dd.run_text(
+                    ["order", "status", "--order-uuid", order_uuid, "--beautify"]
+                )
+            )
+        except DDCLIError:
+            print(f"Order status: {fallback_status}")
+        print("=" * 72)
 
     def _save_receipt(self, order_uuid: str) -> None:
         receipt = self.dd.run_text(["order", "receipt", "--order-uuid", order_uuid, "--beautify"])
@@ -565,3 +677,12 @@ class LunchWorkflow:
     @staticmethod
     def _store_name(store: Dict[str, Any]) -> str:
         return str(store.get("name") or store.get("store_name") or "Restaurant")
+
+    @classmethod
+    def _store_display(cls, store: Dict[str, Any]) -> str:
+        details = []
+        for key in ("delivery_time", "delivery_fee", "distance"):
+            if store.get(key):
+                details.append(str(store[key]))
+        suffix = f" — {' · '.join(details)}" if details else ""
+        return f"{cls._store_name(store)}{suffix}"

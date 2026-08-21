@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+build/
+dist/
+*.spec
+*.zip
+config.json
+.team-lunch-session.json
+receipts/

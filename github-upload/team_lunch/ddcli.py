@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 DEFAULT_INTENT = (
     "Summary: Help the user's team coordinate a group lunch\n"
     "user prompt/purpose: \"Create a terminal-only team lunch group ordering workflow\""
 )
+MINIMUM_DD_CLI_VERSION = (0, 2, 3)
+_VERSION_PATTERN = re.compile(r"\bversion\s+(\d+)\.(\d+)\.(\d+)\b", re.IGNORECASE)
 
 
 class DDCLIError(RuntimeError):
@@ -40,6 +43,30 @@ class DDCLI:
     def version(self) -> str:
         result = self._run(["--version"], timeout=15)
         return result.stdout.strip()
+
+    @staticmethod
+    def parse_version(version_output: str) -> Tuple[int, int, int]:
+        match = _VERSION_PATTERN.search(version_output)
+        if not match:
+            raise DDCLIError(
+                "Could not understand the installed dd-cli version. "
+                "Install DoorDash CLI v0.2.3 or newer."
+            )
+        return tuple(int(part) for part in match.groups())
+
+    def require_minimum_version(
+        self, minimum: Tuple[int, int, int] = MINIMUM_DD_CLI_VERSION
+    ) -> str:
+        version_output = self.version()
+        installed = self.parse_version(version_output)
+        if installed < minimum:
+            required = ".".join(str(part) for part in minimum)
+            found = ".".join(str(part) for part in installed)
+            raise DDCLIError(
+                f"Team Lunch requires dd-cli v{required} or newer; found v{found}. "
+                "Upgrade dd-cli, then run 'team-lunch doctor'."
+            )
+        return version_output
 
     def run_json(
         self,
